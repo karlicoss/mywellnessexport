@@ -1,29 +1,47 @@
 #!/usr/bin/env python3
 import argparse
-import csv
 import html
+import html.parser
 import json
 import re
 import time
-from pathlib import Path
 from datetime import date
-from urllib.parse import quote, urljoin
+from pathlib import Path
+from urllib.parse import urljoin
 
 import requests
 
 
 DEFAULT_BASE_URL = "https://v1.mywellness.com"
-DEFAULT_CLUB = "cloud"
+DEFAULT_PORTAL = "cloud"
 DEFAULT_PASSWORD_FILE = "password"
 DEFAULT_OUTPUT_DIR = "mywellness_export"
+# The API spelling is intentional; "Monthly" returns 500.
+DEFAULT_TREND_PERIOD = "Montly"
+DEFAULT_TREND_COUNT = 12
+# Related projects checked:
+# - https://github.com/lcanis/gymexport uses the same legacy portal login
+#   and token/AppId/culture service calls, but only for workout endpoints.
+# - https://github.com/AeonDave/myWellnezz and https://github.com/mboogerd/mywellness
+#   use Application/{appId}/Login plus class calendar/Core endpoints.
+# - https://github.com/Matt-Mcl/workout-app scrapes legacy Training HTML.
+# None exposes body scan history; that still needs
+#   AvailableBiometrics -> BiometricTrendsNew -> MeasurementDetails.
 
 
 class MywellnessClient:
-    def __init__(self, username: str, password: str, base_url: str, club: str) -> None:
+    def __init__(
+        self,
+        *,
+        username: str,
+        password: str,
+        base_url: str = DEFAULT_BASE_URL,
+        portal: str = DEFAULT_PORTAL,
+    ) -> None:
         self.username = username
         self.password = password
         self.base_url = base_url.rstrip("/")
-        self.club = club.strip("/")
+        self.portal = portal.strip("/")
         self.session = requests.Session()
         self.session.headers.update(
             {
@@ -34,28 +52,38 @@ class MywellnessClient:
                 )
             }
         )
+        # Page-level service config parsed from EU.config, such as API hosts and app id.
         self.config: dict[str, str] = {}
+        # Authenticated user context parsed from EU.currentUser; the token refreshes on API calls.
         self.user: dict[str, object] = {}
 
+    def portal_url(self, path: str = "") -> str:
+        return urljoin(f"{self.base_url}/{self.portal}/", path.lstrip("/"))
+
     def login(self) -> None:
-        return_url = f"{self.base_url}/{self.club}/BodyMeasurement/"
-        login_start = f"{self.base_url}/{self.club}/User/Register?ReturnUrl={quote(return_url, safe='')}"
-        response = self.session.get(login_start, timeout=30)
+        return_url = self.portal_url("BodyMeasurement/")
+        response = self.session.get(
+            self.portal_url("User/Register"),
+            params={"ReturnUrl": return_url},
+            timeout=30,
+        )
         response.raise_for_status()
 
         match = re.search(r'<form[^>]+action=["\']([^"\']+)', response.text, re.IGNORECASE)
         assert match, "Could not find login form action"
         login_url = urljoin(response.url, html.unescape(match.group(1)))
-        response = self.session.post(
-            login_url,
-            data={
-                "UserBinder.MifareId": "",
-                "UserBinder.IsFromLogin": "False",
-                "UserBinder.ForceJoinFacility": "",
+        # The legacy MVC endpoint expects the hidden UserBinder fields it emitted.
+        login_data = self.login_form_data(response.text)
+        login_data.update(
+            {
                 "UserBinder.Username": self.username,
                 "UserBinder.Password": self.password,
                 "UserBinder.KeepMeLogged": "false",
-            },
+            }
+        )
+        response = self.session.post(
+            login_url,
+            data=login_data,
             timeout=30,
         )
         response.raise_for_status()
@@ -64,6 +92,29 @@ class MywellnessClient:
         index = self.session.get(return_url, timeout=30)
         index.raise_for_status()
         self._load_page_config(index.text)
+
+    @staticmethod
+    def login_form_data(page: str) -> dict[str, str]:
+        class Parser(html.parser.HTMLParser):
+            def __init__(self) -> None:
+                super().__init__()
+                self.in_form = False
+                self.data: dict[str, str] = {}
+
+            def handle_starttag(self, tag: str, attrs: list[tuple[str, str | None]]) -> None:
+                attr = dict(attrs)
+                if tag == "form":
+                    self.in_form = True
+                if self.in_form and tag == "input" and attr.get("name"):
+                    self.data[attr["name"]] = attr.get("value") or ""
+
+            def handle_endtag(self, tag: str) -> None:
+                if tag == "form":
+                    self.in_form = False
+
+        parser = Parser()
+        parser.feed(page)
+        return parser.data
 
     def _load_page_config(self, html: str) -> None:
         self.config = dict(
@@ -78,29 +129,41 @@ class MywellnessClient:
         assert self.user.get("token"), "Could not find authenticated API token"
 
     def api_post(self, endpoint: str, payload: dict[str, object] | None = None) -> dict[str, object]:
-        payload = dict(payload or {})
-        culture = str(payload.setdefault("_c", self.user.get("culture") or "en-US"))
-        payload.setdefault("AppId", self.config["API_APP_ID"])
-        payload.setdefault("token", self.user["token"])
+        request_payload: dict[str, object] = {
+            "_c": self.user.get("culture") or "en-US",
+            "AppId": self.config["API_APP_ID"],
+            "token": self.user["token"],
+        }
+        request_payload.update(payload or {})
+        culture = str(request_payload["_c"])
 
         url = (
             f"https://{self.config['WORKOUT_HOST']}"
-            f"/Biometrics/User/{self.user['id']}/{endpoint}?_c={culture}"
+            f"/Biometrics/User/{self.user['id']}/{endpoint}"
         )
+        # These mirror the site's $.ajaxSetup headers for end-user web calls.
         headers = {
             "X-MWAPPS-CLIENT": "enduserweb",
             "X-MWAPPS-APPID": self.config["API_APP_ID"],
         }
         for attempt in range(3):
-            response = self.session.post(url, json=payload, headers=headers, timeout=30)
-            if response.status_code not in {502, 503, 504} or attempt == 2:
+            # The site's service helper sends culture both in the query string and JSON body.
+            response = self.session.post(
+                url,
+                params={"_c": culture},
+                json=request_payload,
+                headers=headers,
+                timeout=30,
+            )
+            if response.status_code != 502 or attempt == 2:
                 break
+            # BiometricTrendsNew intermittently returned 502 during the full sweep.
             time.sleep(1)
         response.raise_for_status()
         data = response.json()
         assert isinstance(data, dict), data
-        if "token" in data:
-            self.user["token"] = data["token"]
+        assert isinstance(data.get("token"), str), "Missing refreshed token in API response"
+        self.user["token"] = data["token"]
         return data
 
     def measurement_details(self, user_measurement_id: str) -> dict[str, object]:
@@ -114,10 +177,11 @@ class MywellnessClient:
 
     def biometric_trends(
         self,
+        *,
         biometric_descriptor_id: str,
         start_day: str,
-        trends: str = "Montly",
-        number_of_trends: int = 12,
+        trends: str = DEFAULT_TREND_PERIOD,
+        number_of_trends: int = DEFAULT_TREND_COUNT,
     ) -> dict[str, object]:
         data = self.api_post(
             "BiometricTrendsNew",
@@ -140,6 +204,7 @@ def read_password(path: Path) -> str:
 
 
 def collect_measurement_ids(*objects: object) -> list[str]:
+    """Return every userMeasurementId found while recursively walking API objects."""
     found: dict[str, None] = {}
 
     def visit(value: object) -> None:
@@ -159,6 +224,7 @@ def collect_measurement_ids(*objects: object) -> list[str]:
 
 
 def collect_available_biometric_ids(available: dict[str, object]) -> list[str]:
+    """Return biometric descriptor ids used to ask BiometricTrendsNew for history."""
     data = available.get("data")
     assert isinstance(data, dict), available
     biometrics = data.get("biometrics")
@@ -174,6 +240,7 @@ def collect_available_biometric_ids(available: dict[str, object]) -> list[str]:
 
 
 def collect_trend_measurement_ids(trends: dict[str, dict[str, object]]) -> list[str]:
+    """Return measurement ids carried by BiometricTrendsNew trend points."""
     found: dict[str, None] = {}
     for trend_data in trends.values():
         points = trend_data.get("points")
@@ -188,129 +255,8 @@ def collect_trend_measurement_ids(trends: dict[str, dict[str, object]]) -> list[
     return list(found)
 
 
-def flatten_measure(measurement: dict[str, object], measure: dict[str, object]) -> dict[str, object]:
-    descriptor = measure.get("descriptor")
-    ideal_range = measure.get("idealRange")
-    if not isinstance(descriptor, dict):
-        descriptor = {}
-    if not isinstance(ideal_range, dict):
-        ideal_range = {}
-
-    return {
-        "userMeasurementId": measurement.get("userMeasurementId"),
-        "measuredOn": measurement.get("measuredOn") or measure.get("measuredOn"),
-        "measureDescriptorId": measure.get("measureDescriptorId")
-        or measurement.get("measureDescriptorId"),
-        "biometricDescriptorId": measure.get("biometricDescriptorId"),
-        "name": measure.get("name"),
-        "type": measure.get("type"),
-        "category": measure.get("category"),
-        "subCategory": measure.get("subCategory"),
-        "value": measure.get("value"),
-        "storedValue": measure.get("storedValue"),
-        "displayValue": measure.get("displayValue"),
-        "formattedDisplayValue": measure.get("formattedDisplayValue"),
-        "unitOfMeasure": measure.get("unitOfMeasure"),
-        "descriptorUnitOfMeasure": descriptor.get("unitOfMeasure"),
-        "descriptorUnitOfMeasureString": descriptor.get("unitOfMeasureString"),
-        "idealRangeMin": ideal_range.get("min"),
-        "idealRangeMax": ideal_range.get("max"),
-        "facilityId": measure.get("facilityId") or measurement.get("facilityId"),
-        "measuredBy": measure.get("measuredBy") or measurement.get("measuredBy"),
-        "measuredWhere": measurement.get("measuredWhere"),
-        "calculated": measure.get("calculated"),
-        "isDefaultValue": measure.get("isDefaultValue"),
-    }
-
-
-def flatten_trend_value(
-    biometric_descriptor_id: str,
-    value: dict[str, object],
-    metadata: dict[str, object],
-) -> dict[str, object]:
-    descriptor = metadata.get("descriptor")
-    ideal_range = metadata.get("idealRange")
-    if not isinstance(descriptor, dict):
-        descriptor = {}
-    if not isinstance(ideal_range, dict):
-        ideal_range = {}
-
-    measured_on = value.get("measuredOn")
-    return {
-        "userMeasurementId": f"trend:{measured_on}",
-        "measuredOn": measured_on,
-        "measureDescriptorId": metadata.get("measureDescriptorId"),
-        "biometricDescriptorId": biometric_descriptor_id,
-        "name": metadata.get("name"),
-        "type": metadata.get("type"),
-        "category": metadata.get("category"),
-        "subCategory": metadata.get("subCategory"),
-        "value": value.get("value"),
-        "storedValue": value.get("value"),
-        "displayValue": value.get("displayValue"),
-        "formattedDisplayValue": value.get("displayValue"),
-        "unitOfMeasure": metadata.get("unitOfMeasure"),
-        "descriptorUnitOfMeasure": descriptor.get("unitOfMeasure"),
-        "descriptorUnitOfMeasureString": descriptor.get("unitOfMeasureString"),
-        "idealRangeMin": ideal_range.get("min"),
-        "idealRangeMax": ideal_range.get("max"),
-        "facilityId": None,
-        "measuredBy": value.get("measuredBy"),
-        "measuredWhere": None,
-        "calculated": metadata.get("calculated"),
-        "isDefaultValue": None,
-    }
-
-
-def collect_trend_only_rows(
-    latest: dict[str, object],
-    available: dict[str, object],
-    existing_rows: list[dict[str, object]],
-) -> list[dict[str, object]]:
-    available_data = available.get("data")
-    latest_data = latest.get("data")
-    assert isinstance(available_data, dict), available
-    assert isinstance(latest_data, dict), latest
-
-    biometrics = available_data.get("biometrics")
-    trend_values = latest_data.get("trendValues")
-    assert isinstance(biometrics, list), available_data
-    assert isinstance(trend_values, list), latest_data
-
-    metadata_by_id = {
-        item["biometricDescriptorId"]: item
-        for item in biometrics
-        if isinstance(item, dict) and item.get("biometricDescriptorId")
-    }
-    existing_keys = {
-        (row.get("measuredOn"), row.get("biometricDescriptorId"))
-        for row in existing_rows
-    }
-    rows: list[dict[str, object]] = []
-
-    for trend in trend_values:
-        assert isinstance(trend, dict), trend
-        biometric_descriptor_id = trend.get("biometricDescriptorId")
-        assert isinstance(biometric_descriptor_id, str), trend
-        metadata = metadata_by_id.get(biometric_descriptor_id)
-        assert metadata is not None, trend
-
-        values = trend.get("values")
-        assert isinstance(values, list), trend
-        for value in values:
-            assert isinstance(value, dict), value
-            measured_on = value.get("measuredOn")
-            key = (measured_on, biometric_descriptor_id)
-            if key in existing_keys:
-                continue
-            row = flatten_trend_value(biometric_descriptor_id, value, metadata)
-            rows.append(row)
-            existing_keys.add(key)
-
-    return rows
-
-
 def scrub_for_export(value: object) -> object:
+    """Remove session credentials from API wrapper objects before writing JSON."""
     if isinstance(value, dict):
         return {
             key: scrub_for_export(child)
@@ -326,17 +272,6 @@ def write_json(path: Path, value: object) -> None:
     path.write_text(json.dumps(scrub_for_export(value), indent=2, sort_keys=True) + "\n")
 
 
-def write_csv(path: Path, rows: list[dict[str, object]]) -> None:
-    if not rows:
-        path.write_text("")
-        return
-    fieldnames = list(rows[0])
-    with path.open("w", newline="") as f:
-        writer = csv.DictWriter(f, fieldnames=fieldnames)
-        writer.writeheader()
-        writer.writerows(rows)
-
-
 def export_body_measurements(client: MywellnessClient, output_dir: Path) -> None:
     output_dir.mkdir(parents=True, exist_ok=True)
 
@@ -345,7 +280,7 @@ def export_body_measurements(client: MywellnessClient, output_dir: Path) -> None
     available = client.api_post("AvailableBiometrics")
     trends = {
         biometric_descriptor_id: client.biometric_trends(
-            biometric_descriptor_id,
+            biometric_descriptor_id=biometric_descriptor_id,
             start_day=date.today().isoformat(),
         )
         for biometric_descriptor_id in collect_available_biometric_ids(available)
@@ -363,38 +298,17 @@ def export_body_measurements(client: MywellnessClient, output_dir: Path) -> None
     details = [client.measurement_details(measurement_id) for measurement_id in measurement_ids]
     write_json(output_dir / "measurement_details.json", details)
 
-    detail_rows: list[dict[str, object]] = []
+    measure_count = 0
     for measurement in details:
         measures = measurement.get("measures")
         assert isinstance(measures, list), measurement
-        for measure in measures:
-            assert isinstance(measure, dict), measure
-            detail_rows.append(flatten_measure(measurement, measure))
+        measure_count += len(measures)
 
-    trend_only_rows = collect_trend_only_rows(latest, available, detail_rows)
-    rows = detail_rows + trend_only_rows
-
-    rows.sort(
-        key=lambda row: (
-            str(row.get("measuredOn") or ""),
-            str(row.get("name") or ""),
-            str(row.get("biometricDescriptorId") or ""),
-        )
-    )
-    write_csv(output_dir / "body_measurements.csv", rows)
-
-    session_ids = {row["userMeasurementId"] for row in rows}
     summary = {
         "detailed_measurement_session_count": len(details),
-        "trend_only_measurement_session_count": len(
-            {row["userMeasurementId"] for row in trend_only_rows}
-        ),
-        "measurement_session_count": len(session_ids),
-        "detailed_measure_count": len(detail_rows),
-        "trend_only_measure_count": len(trend_only_rows),
-        "flattened_measure_count": len(rows),
+        "measurement_session_count": len(details),
+        "measure_count": measure_count,
         "files": [
-            "body_measurements.csv",
             "measurement_details.json",
             "last_biometrics_measurements.json",
             "measurements_descriptor_list.json",
@@ -405,7 +319,7 @@ def export_body_measurements(client: MywellnessClient, output_dir: Path) -> None
     write_json(output_dir / "summary.json", summary)
 
     print(f"Exported {summary['measurement_session_count']} measurement sessions")
-    print(f"Exported {summary['flattened_measure_count']} flattened measures")
+    print(f"Exported {summary['measure_count']} measures")
     print(f"Output directory: {output_dir}")
 
 
@@ -414,7 +328,12 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--username", default=DEFAULT_USERNAME)
     parser.add_argument("--password-file", type=Path, default=Path(DEFAULT_PASSWORD_FILE))
     parser.add_argument("--base-url", default=DEFAULT_BASE_URL)
-    parser.add_argument("--club", default=DEFAULT_CLUB)
+    parser.add_argument(
+        "--portal",
+        default=DEFAULT_PORTAL,
+        help="v1 URL segment for the portal; the public end-user portal is 'cloud'.",
+    )
+    parser.add_argument("--club", dest="portal", help=argparse.SUPPRESS)
     parser.add_argument("--output-dir", type=Path, default=Path(DEFAULT_OUTPUT_DIR))
     return parser.parse_args()
 
@@ -425,7 +344,7 @@ def main() -> None:
         username=args.username,
         password=read_password(args.password_file),
         base_url=args.base_url,
-        club=args.club,
+        portal=args.portal,
     )
     client.login()
     export_body_measurements(client, args.output_dir)

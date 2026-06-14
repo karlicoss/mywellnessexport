@@ -3,7 +3,6 @@
 # dependencies = ["matplotlib>=3.8"]
 # ///
 import argparse
-import csv
 import html
 import math
 import os
@@ -21,8 +20,9 @@ matplotlib.use("Agg")
 import matplotlib.dates as mdates
 import matplotlib.pyplot as plt
 
+from mywellness_data import DEFAULT_DETAILS, iter_measure_rows, load_measurement_details
 
-DEFAULT_CSV = Path("mywellness_export/body_measurements.csv")
+
 DEFAULT_OUTPUT_DIR = Path("mywellness_export/plots")
 
 
@@ -51,10 +51,10 @@ def parse_datetime(value: str) -> datetime:
     assert False, value
 
 
-def parse_number(value: str | None) -> float | None:
+def parse_number(value: object) -> float | None:
     if value is None:
         return None
-    value = value.strip()
+    value = str(value).strip()
     if not value:
         return None
     try:
@@ -69,7 +69,7 @@ def parse_number(value: str | None) -> float | None:
     return parsed
 
 
-def row_value(row: dict[str, str]) -> float | None:
+def row_value(row: dict[str, object]) -> float | None:
     for field in ("value", "storedValue", "displayValue", "formattedDisplayValue"):
         value = parse_number(row.get(field))
         if value is not None:
@@ -77,15 +77,14 @@ def row_value(row: dict[str, str]) -> float | None:
     return None
 
 
-def read_rows(path: Path) -> list[dict[str, str]]:
-    with path.open(newline="") as f:
-        return list(csv.DictReader(f))
+def read_rows(path: Path) -> list[dict[str, object]]:
+    return list(iter_measure_rows(load_measurement_details(path)))
 
 
-def metric_unit(rows: list[dict[str, str]]) -> str:
+def metric_unit(rows: list[dict[str, object]]) -> str:
     for row in rows:
         for field in ("descriptorUnitOfMeasureString", "unitOfMeasure", "descriptorUnitOfMeasure"):
-            value = row.get(field, "").strip()
+            value = str(row.get(field) or "").strip()
             if value:
                 return value
     return ""
@@ -103,11 +102,11 @@ def slugify(value: str) -> str:
     return slug or "measurement"
 
 
-def collect_metrics(rows: list[dict[str, str]]) -> dict[str, list[tuple[datetime, float, dict[str, str]]]]:
-    metrics: dict[str, list[tuple[datetime, float, dict[str, str]]]] = defaultdict(list)
+def collect_metrics(rows: list[dict[str, object]]) -> dict[str, list[tuple[datetime, float, dict[str, object]]]]:
+    metrics: dict[str, list[tuple[datetime, float, dict[str, object]]]] = defaultdict(list)
     for row in rows:
-        name = row.get("name", "").strip()
-        measured_on = row.get("measuredOn", "").strip()
+        name = str(row.get("name") or "").strip()
+        measured_on = str(row.get("measuredOn") or "").strip()
         value = row_value(row)
         if not name or not measured_on or value is None:
             continue
@@ -118,7 +117,7 @@ def collect_metrics(rows: list[dict[str, str]]) -> dict[str, list[tuple[datetime
     return dict(sorted(metrics.items()))
 
 
-def ideal_range(points: list[tuple[datetime, float, dict[str, str]]]) -> tuple[float, float] | None:
+def ideal_range(points: list[tuple[datetime, float, dict[str, object]]]) -> tuple[float, float] | None:
     ranges = {
         (
             parse_number(row.get("idealRangeMin")),
@@ -138,7 +137,7 @@ def ideal_range(points: list[tuple[datetime, float, dict[str, str]]]) -> tuple[f
 
 def plot_metric(
     name: str,
-    points: list[tuple[datetime, float, dict[str, str]]],
+    points: list[tuple[datetime, float, dict[str, object]]],
     output_dir: Path,
     image_format: str,
 ) -> Path:
@@ -205,7 +204,7 @@ def write_index(output_dir: Path, plots: list[tuple[str, Path, int]]) -> None:
     (output_dir / "index.html").write_text(document)
 
 
-def list_metrics(metrics: dict[str, list[tuple[datetime, float, dict[str, str]]]]) -> None:
+def list_metrics(metrics: dict[str, list[tuple[datetime, float, dict[str, object]]]]) -> None:
     for name, points in sorted(metrics.items(), key=lambda item: (-len(item[1]), item[0])):
         unit = metric_unit([point[2] for point in points])
         suffix = f" [{unit}]" if unit else ""
@@ -214,7 +213,7 @@ def list_metrics(metrics: dict[str, list[tuple[datetime, float, dict[str, str]]]
 
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Plot exported Mywellness body measurements.")
-    parser.add_argument("--csv", type=Path, default=DEFAULT_CSV)
+    parser.add_argument("--details", type=Path, default=DEFAULT_DETAILS)
     parser.add_argument("--output-dir", type=Path, default=DEFAULT_OUTPUT_DIR)
     parser.add_argument(
         "--metric",
@@ -230,7 +229,7 @@ def parse_args() -> argparse.Namespace:
 
 def main() -> None:
     args = parse_args()
-    rows = read_rows(args.csv)
+    rows = read_rows(args.details)
     metrics = collect_metrics(rows)
 
     if args.list_metrics:
