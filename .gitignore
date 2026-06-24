@@ -1,5 +1,4 @@
-password
-mywellness_export/
 __pycache__/
+uv.lock
 *.swp
 *.zip
