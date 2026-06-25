@@ -56,9 +56,7 @@ class LoginFormParser(html.parser.HTMLParser):
 def _scrub_for_export(value: Json) -> Json:
     if isinstance(value, dict):
         return {
-            key: _scrub_for_export(child)
-            for key, child in value.items()
-            if key.lower() not in {"password", "token"}
+            key: _scrub_for_export(child) for key, child in value.items() if key.lower() not in {"password", "token"}
         }
     if isinstance(value, list):
         return [_scrub_for_export(child) for child in value]
@@ -94,7 +92,7 @@ class MywellnessClient:
                     "Chrome/125.0 Safari/537.36"
                 )
             }
-        )
+        )  # fmt: skip
         self.config: dict[str, str] = {}
         self.user: JsonObject = {}
 
@@ -152,9 +150,7 @@ class MywellnessClient:
         self._load_page_config(index.text)
 
     def _load_page_config(self, page: str) -> None:
-        self.config = dict(
-            re.findall(r'(API_HOST|WORKOUT_HOST|API_APP_ID):\s*"([^"]+)"', page)
-        )
+        self.config = dict(re.findall(r'(API_HOST|WORKOUT_HOST|API_APP_ID):\s*"([^"]+)"', page))
         assert self.config.keys() >= {"WORKOUT_HOST", "API_APP_ID"}, self.config
 
         match = re.search(r"EU\.currentUser = JSON\.parse\('(.+?)'\);", page)
@@ -172,10 +168,7 @@ class MywellnessClient:
         request_payload.update(payload or {})
         culture = str(request_payload["_c"])
 
-        url = (
-            f"https://{self.config['WORKOUT_HOST']}"
-            f"/Biometrics/User/{self.user['id']}/{endpoint}"
-        )
+        url = f"https://{self.config['WORKOUT_HOST']}/Biometrics/User/{self.user['id']}/{endpoint}"
         response = self.request(
             "POST",
             url,
@@ -299,7 +292,6 @@ def export_account(
     _write_json(output_directory / "service-config.json", client.config)
     _write_json(output_directory / "measurements-descriptor-list.json", descriptors)
     _write_json(output_directory / "available-biometrics.json", available)
-    _write_json(output_directory / "biometric-trends.json", trends)
 
     print(f"Found {len(measurement_ids)} measurement sessions", file=sys.stderr)
     for index, measurement_id in enumerate(measurement_ids, start=1):
@@ -324,7 +316,6 @@ def export_account(
             f"{details.get('measureName', '')} ({status}, {len(measures)} measures)",
             file=sys.stderr,
         )
-
 
 
 def _make_parser() -> argparse.ArgumentParser:

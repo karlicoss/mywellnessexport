@@ -26,5 +26,5 @@ def session_file_name(session: JsonObject) -> str:
         .replace(" ", "T")
         .replace("+", "p")
         .replace("/", "")
-    )
+    )  # fmt: skip
     return safe_file_name(f"{timestamp}_{measurement_id}.json")

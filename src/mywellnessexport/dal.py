@@ -209,6 +209,7 @@ class DAL:
             names.setdefault(measure.name, None)
         return sorted(names)
 
+
 def _table_cell(value: Json) -> str:
     if value is None:
         return ""
@@ -251,12 +252,12 @@ def measurement_table(
         name
         for name in _default_table_metrics
         if name in all_names and _metric_matches(name, metric_filters)
-    ]
+    ]  # fmt: skip
     extra_metrics = [
         name
         for name in all_names
         if name not in metrics and _metric_matches(name, metric_filters)
-    ]
+    ]  # fmt: skip
     metrics.extend(extra_metrics)
 
     headers = ["measuredOn", "sessionId", *metrics]

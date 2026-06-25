@@ -48,7 +48,6 @@ mywellness-export/
   service-config.json
   measurements-descriptor-list.json
   available-biometrics.json
-  biometric-trends.json
   sessions/
     <timestamp>_<measurement-id>.json
 ```
