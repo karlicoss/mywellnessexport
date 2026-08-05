@@ -1,56 +1,33 @@
 from __future__ import annotations
 
 import argparse
-import html
-import html.parser
 import json
-import re
 import sys
 import time
 from datetime import date
 from pathlib import Path
 from typing import Any
-from urllib.parse import urljoin
 
 import requests
 
 from .common import Json, JsonObject, session_file_name
 
-DEFAULT_BASE_URL = "https://v1.mywellness.com"
-DEFAULT_PORTAL = "cloud"
+DEFAULT_API_APP_ID = "EC1D38D7-D359-48D0-A60C-D8C0B8FB9DF9"
+DEFAULT_API_HOST = "services.mywellness.com"
+DEFAULT_WORKOUT_HOST = "workout.mywellness.com"
 # The API spelling is intentional; "Monthly" returns 500.
 DEFAULT_TREND_PERIOD = "Montly"
 DEFAULT_TREND_COUNT = 12
 
 # Related projects checked:
-# - https://github.com/lcanis/gymexport uses the same legacy portal login
-#   and token/AppId/culture service calls, but only for workout endpoints.
-# - https://github.com/AeonDave/myWellnezz and https://github.com/mboogerd/mywellness
-#   use Application/{appId}/Login plus class calendar/Core endpoints.
-# - https://github.com/Matt-Mcl/workout-app scrapes legacy Training HTML.
+# - https://github.com/AeonDave/myWellnezz and https://github.com/mboogerd/mywellness use
+#   Application/{appId}/Login plus class calendar/Core endpoints.
+# - https://github.com/lcanis/gymexport and https://github.com/Matt-Mcl/workout-app scrape
+#   the retired legacy portal.
 # None exposes body scan history; that still needs
 #   AvailableBiometrics -> BiometricTrendsNew -> MeasurementDetails.
 
 _TRANSIENT_STATUS_CODES = {502}
-
-
-class LoginFormParser(html.parser.HTMLParser):
-    def __init__(self) -> None:
-        super().__init__()
-        self.in_form = False
-        self.data: dict[str, str] = {}
-
-    def handle_starttag(self, tag: str, attrs: list[tuple[str, str | None]]) -> None:
-        attr = dict(attrs)
-        if tag == "form":
-            self.in_form = True
-        name = attr.get("name")
-        if self.in_form and tag == "input" and name is not None:
-            self.data[name] = attr.get("value") or ""
-
-    def handle_endtag(self, tag: str) -> None:
-        if tag == "form":
-            self.in_form = False
 
 
 def _scrub_for_export(value: Json) -> Json:
@@ -93,11 +70,12 @@ class MywellnessClient:
                 )
             }
         )  # fmt: skip
-        self.config: dict[str, str] = {}
+        self.config = {
+            "API_APP_ID": DEFAULT_API_APP_ID,
+            "API_HOST": DEFAULT_API_HOST,
+            "WORKOUT_HOST": DEFAULT_WORKOUT_HOST,
+        }
         self.user: JsonObject = {}
-
-    def portal_url(self, path: str = "") -> str:
-        return urljoin(f"{DEFAULT_BASE_URL}/{DEFAULT_PORTAL}/", path.lstrip("/"))
 
     def request(
         self,
@@ -118,46 +96,45 @@ class MywellnessClient:
         return response
 
     def login(self) -> None:
-        return_url = self.portal_url("BodyMeasurement/")
         response = self.request(
-            "GET",
-            self.portal_url("User/Register"),
-            params={"ReturnUrl": return_url},
+            "POST",
+            f"https://{DEFAULT_API_HOST}/Application/{DEFAULT_API_APP_ID}/Login",
+            params={"_c": "en-US"},
+            json={
+                "domain": "com.mywellness",
+                "keepMeLoggedIn": False,
+                "username": self.email,
+                "password": self.password,
+            },
+            headers={
+                "X-MWAPPS-CLIENT": "enduserweb",
+                "X-MWAPPS-APPID": DEFAULT_API_APP_ID,
+            },
             timeout=30,
         )
         response.raise_for_status()
+        payload = response.json()
+        assert isinstance(payload, dict), payload
+        data = payload.get("data")
+        assert isinstance(data, dict), payload
+        user_context = data.get("userContext")
+        assert isinstance(user_context, dict), payload
+        user_id = user_context.get("id")
+        token = payload.get("token")
+        culture = user_context.get("defaultCulture")
+        assert isinstance(user_id, str), user_context
+        assert isinstance(token, str), payload.get("errors")
+        assert isinstance(culture, str), user_context
 
-        match = re.search(r'<form[^>]+action=["\']([^"\']+)', response.text, re.IGNORECASE)
-        assert match, "Could not find login form action"
-        login_url = urljoin(response.url, html.unescape(match.group(1)))
-
-        parser = LoginFormParser()
-        parser.feed(response.text)
-        login_data = parser.data
-        login_data.update(
-            {
-                "UserBinder.Username": self.email,
-                "UserBinder.Password": self.password,
-                "UserBinder.KeepMeLogged": "false",
-            }
-        )
-        response = self.request("POST", login_url, data=login_data, timeout=30)
-        response.raise_for_status()
-        assert "UserBinder.Password" not in response.text, response.url
-
-        index = self.request("GET", return_url, timeout=30)
-        index.raise_for_status()
-        self._load_page_config(index.text)
-
-    def _load_page_config(self, page: str) -> None:
-        self.config = dict(re.findall(r'(API_HOST|WORKOUT_HOST|API_APP_ID):\s*"([^"]+)"', page))
-        assert self.config.keys() >= {"WORKOUT_HOST", "API_APP_ID"}, self.config
-
-        match = re.search(r"EU\.currentUser = JSON\.parse\('(.+?)'\);", page)
-        assert match, "Could not find EU.currentUser in authenticated page"
-        self.user = json.loads(match.group(1).encode().decode("unicode_escape"))
-        assert isinstance(self.user.get("id"), str), self.user
-        assert isinstance(self.user.get("token"), str), self.user
+        self.user = {
+            "aspirationMap": None,
+            "culture": culture,
+            "id": user_id,
+            "language": culture.partition("-")[0],
+            "measurementSystem": user_context.get("measurementSystem"),
+            "token": token,
+            "windowTimeZoneId": user_context.get("timeZoneWindowsId"),
+        }
 
     def api_post(self, endpoint: str, payload: JsonObject | None = None) -> JsonObject:
         request_payload: JsonObject = {

@@ -38,6 +38,9 @@ For incremental updates, reuse the same output directory. Existing session
 files are checked for consistency and reused; missing session details are
 downloaded.
 
+Authentication uses the Mywellness application JSON API.
+The retired legacy HTML portal is not required.
+
 ## Raw Archive
 
 The exporter writes:
