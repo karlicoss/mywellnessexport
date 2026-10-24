@@ -1,16 +1,17 @@
 from __future__ import annotations
 
 import argparse
-import json
 from collections.abc import Iterator, Sequence
 from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
+from typing import Any
 
-from .common import Json, JsonObject
+from hpikit.datetime import AwareDateTime, aware
+from hpikit.json import Json, loads
 
 
-def _is_profile_measurement_session(session: JsonObject) -> bool:
+def _is_profile_measurement_session(session: Json) -> bool:
     # These look like signup/profile biometrics, not device measurement sessions.
     return session.get("measuredWhere") == "WebSiteUserProfile" and session.get("facilityId") is None
 
@@ -36,7 +37,7 @@ def _is_performance_session(session: Session) -> bool:
     return "Performance" in _session_measure_categories(session)
 
 
-def _measure_display_value(measure: JsonObject) -> Json:
+def _measure_display_value(measure: Json) -> Any:
     for field in ("formattedDisplayValue", "displayValue", "value", "storedValue"):
         value = measure.get(field)
         if value not in (None, ""):
@@ -54,8 +55,8 @@ def _metric_matches(name: str, filters: Sequence[str]) -> bool:
 @dataclass(frozen=True)
 class Snapshot:
     root: Path
-    profile: JsonObject
-    sessions_raw: list[JsonObject]
+    profile: Json
+    sessions_raw: list[Json]
 
     @classmethod
     def load(cls, source: Path | str) -> Snapshot:
@@ -64,12 +65,12 @@ class Snapshot:
             root = root.parent
         root = root.resolve()
 
-        profile = json.loads((root / "profile.json").read_text())
+        profile = loads((root / "profile.json").read_bytes())
         assert isinstance(profile, dict), profile
 
-        sessions: list[JsonObject] = []
+        sessions: list[Json] = []
         for path in sorted((root / "sessions").glob("*.json")):
-            session = json.loads(path.read_text())
+            session = loads(path.read_bytes())
             assert isinstance(session, dict), session
             measurement_id = session["userMeasurementId"]
             assert isinstance(measurement_id, str), session
@@ -80,7 +81,7 @@ class Snapshot:
 @dataclass(frozen=True)
 class Measure:
     session: Session
-    raw: JsonObject
+    raw: Json
 
     @property
     def name(self) -> str:
@@ -89,10 +90,10 @@ class Measure:
         return value
 
     @property
-    def display_value(self) -> Json:
+    def display_value(self) -> Any:
         return _measure_display_value(self.raw)
 
-    def row(self) -> JsonObject:
+    def row(self) -> Json:
         # Mywellness omits these nested objects on simple profile measures.
         descriptor = self.raw.get("descriptor", {})
         assert isinstance(descriptor, dict), descriptor
@@ -127,7 +128,7 @@ class Measure:
 @dataclass(frozen=True)
 class Session:
     snapshot: Snapshot
-    raw: JsonObject
+    raw: Json
 
     @property
     def id(self) -> str:
@@ -142,10 +143,10 @@ class Session:
         return value
 
     @property
-    def measured_on(self) -> datetime:
+    def measured_on(self) -> AwareDateTime:
         value = self.measured_on_raw.strip()
         assert value, "empty measuredOn value"
-        return datetime.fromisoformat(value)
+        return aware(datetime.fromisoformat(value))
 
     @property
     def measure_name(self) -> str:
@@ -199,7 +200,7 @@ class DAL:
         for session in self.sessions():
             yield from session.measures()
 
-    def measure_rows(self) -> Iterator[JsonObject]:
+    def measure_rows(self) -> Iterator[Json]:
         for measure in self.measures():
             yield measure.row()
 
@@ -210,13 +211,13 @@ class DAL:
         return sorted(names)
 
 
-def _table_cell(value: Json) -> str:
+def _table_cell(value: Any) -> str:
     if value is None:
         return ""
     return str(value)
 
 
-def _table(headers: Sequence[str], rows: Sequence[Sequence[Json]]) -> str:
+def _table(headers: Sequence[str], rows: Sequence[Sequence[Any]]) -> str:
     from tabulate import tabulate
 
     rendered = [[_table_cell(value) for value in row] for row in rows]
@@ -261,7 +262,7 @@ def measurement_table(
     metrics.extend(extra_metrics)
 
     headers = ["measuredOn", "sessionId", *metrics]
-    rows: list[list[Json]] = []
+    rows: list[list[Any]] = []
     for session in sessions:
         values = {measure.name: measure.display_value for measure in session.measures()}
         rows.append([session.measured_on_raw, session.id, *(values.get(metric) for metric in metrics)])

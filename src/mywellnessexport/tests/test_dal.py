@@ -3,7 +3,9 @@ from __future__ import annotations
 import json
 from pathlib import Path
 
-from mywellnessexport.common import JsonObject, session_file_name
+from hpikit.json import Json
+
+from mywellnessexport.common import session_file_name
 from mywellnessexport.dal import DAL, measurement_table
 from mywellnessexport.export import _scrub_for_export
 
@@ -14,7 +16,7 @@ def _write_json(path: Path, value: object) -> None:
 
 
 def test_dal_filters_profile_measurements(tmp_path: Path) -> None:
-    body_scan: JsonObject = {
+    body_scan: Json = {
         "userMeasurementId": "scan-1",
         "measuredOn": "2026-06-09 18:21:13 +01:00",
         "measureName": "Technogym Health",
@@ -29,7 +31,7 @@ def test_dal_filters_profile_measurements(tmp_path: Path) -> None:
             }
         ],
     }
-    profile: JsonObject = {
+    profile: Json = {
         "userMeasurementId": "profile-1",
         "measuredOn": "2023-01-20 13:14:57 +00:00",
         "measureName": "BMI",
@@ -42,7 +44,7 @@ def test_dal_filters_profile_measurements(tmp_path: Path) -> None:
             }
         ],
     }
-    performance: JsonObject = {
+    performance: Json = {
         "userMeasurementId": "strength-1",
         "measuredOn": "2023-02-03 12:52:48 +00:00",
         "measureName": "1RM Artis Circuit",
@@ -57,7 +59,7 @@ def test_dal_filters_profile_measurements(tmp_path: Path) -> None:
         ],
     }
 
-    sessions: list[JsonObject] = [body_scan, profile, performance]
+    sessions: list[Json] = [body_scan, profile, performance]
     _write_json(tmp_path / "profile.json", {"id": "user-1"})
     for session in sessions:
         _write_json(tmp_path / "sessions" / session_file_name(session), session)
