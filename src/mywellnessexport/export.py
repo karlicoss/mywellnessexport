@@ -2,15 +2,18 @@ from __future__ import annotations
 
 import argparse
 import json
-import sys
 import time
 from datetime import date
 from pathlib import Path
 from typing import Any
 
 import requests
+from hpikit.json import Json
+from kloggy import get_logger
 
-from .common import Json, JsonObject, session_file_name
+from .common import session_file_name
+
+logger = get_logger(__name__)
 
 DEFAULT_API_APP_ID = "EC1D38D7-D359-48D0-A60C-D8C0B8FB9DF9"
 DEFAULT_API_HOST = "services.mywellness.com"
@@ -30,7 +33,7 @@ DEFAULT_TREND_COUNT = 12
 _TRANSIENT_STATUS_CODES = {502}
 
 
-def _scrub_for_export(value: Json) -> Json:
+def _scrub_for_export(value: Any) -> Any:
     if isinstance(value, dict):
         return {
             key: _scrub_for_export(child) for key, child in value.items() if key.lower() not in {"password", "token"}
@@ -40,12 +43,12 @@ def _scrub_for_export(value: Json) -> Json:
     return value
 
 
-def _write_json(path: Path, value: Json) -> None:
+def _write_json(path: Path, value: Any) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(json.dumps(_scrub_for_export(value), indent=2, ensure_ascii=False, sort_keys=True))
 
 
-def _assert_unchanged(path: Path, value: Json) -> None:
+def _assert_unchanged(path: Path, value: Any) -> None:
     if not path.exists():
         return
     assert json.loads(path.read_text()) == _scrub_for_export(value), path
@@ -75,7 +78,7 @@ class MywellnessClient:
             "API_HOST": DEFAULT_API_HOST,
             "WORKOUT_HOST": DEFAULT_WORKOUT_HOST,
         }
-        self.user: JsonObject = {}
+        self.user: Json = {}
 
     def request(
         self,
@@ -136,8 +139,8 @@ class MywellnessClient:
             "windowTimeZoneId": user_context.get("timeZoneWindowsId"),
         }
 
-    def api_post(self, endpoint: str, payload: JsonObject | None = None) -> JsonObject:
-        request_payload: JsonObject = {
+    def api_post(self, endpoint: str, payload: Json | None = None) -> Json:
+        request_payload: Json = {
             "_c": self.user.get("culture") or "en-US",
             "AppId": self.config["API_APP_ID"],
             "token": self.user["token"],
@@ -164,7 +167,7 @@ class MywellnessClient:
         self.user["token"] = data["token"]
         return data
 
-    def measurement_details(self, user_measurement_id: str) -> JsonObject:
+    def measurement_details(self, user_measurement_id: str) -> Json:
         data = self.api_post("MeasurementDetails", {"userMeasurementId": user_measurement_id})
         details = data.get("data")
         assert isinstance(details, dict), data
@@ -177,7 +180,7 @@ class MywellnessClient:
         start_day: str,
         trends: str = DEFAULT_TREND_PERIOD,
         number_of_trends: int = DEFAULT_TREND_COUNT,
-    ) -> JsonObject:
+    ) -> Json:
         data = self.api_post(
             "BiometricTrendsNew",
             {
@@ -192,10 +195,10 @@ class MywellnessClient:
         return trend_data
 
 
-def collect_measurement_ids(*objects: Json) -> list[str]:
+def collect_measurement_ids(*objects: Any) -> list[str]:
     found: dict[str, None] = {}
 
-    def visit(value: Json) -> None:
+    def visit(value: Any) -> None:
         if isinstance(value, dict):
             measurement_id = value.get("userMeasurementId")
             if isinstance(measurement_id, str) and measurement_id:
@@ -211,7 +214,7 @@ def collect_measurement_ids(*objects: Json) -> list[str]:
     return list(found)
 
 
-def collect_available_biometric_ids(available: JsonObject) -> list[str]:
+def collect_available_biometric_ids(available: Json) -> list[str]:
     data = available.get("data")
     assert isinstance(data, dict), available
     biometrics = data.get("biometrics")
@@ -226,7 +229,7 @@ def collect_available_biometric_ids(available: JsonObject) -> list[str]:
     return ids
 
 
-def collect_trend_measurement_ids(trends: dict[str, JsonObject]) -> list[str]:
+def collect_trend_measurement_ids(trends: dict[str, Json]) -> list[str]:
     found: dict[str, None] = {}
     for trend_data in trends.values():
         points = trend_data.get("points")
@@ -270,7 +273,7 @@ def export_account(
     _write_json(output_directory / "measurements-descriptor-list.json", descriptors)
     _write_json(output_directory / "available-biometrics.json", available)
 
-    print(f"Found {len(measurement_ids)} measurement sessions", file=sys.stderr)
+    logger.info(f"Found {len(measurement_ids)} measurement sessions")
     for index, measurement_id in enumerate(measurement_ids, start=1):
         matching = sorted((output_directory / "sessions").glob(f"*_{measurement_id}.json"))
         if matching:
@@ -288,10 +291,9 @@ def export_account(
 
         measures = details.get("measures")
         assert isinstance(measures, list), details
-        print(
+        logger.info(
             f"[{index}/{len(measurement_ids)}] {details['measuredOn']} "
-            f"{details.get('measureName', '')} ({status}, {len(measures)} measures)",
-            file=sys.stderr,
+            f"{details.get('measureName', '')} ({status}, {len(measures)} measures)"
         )
 
 
@@ -315,7 +317,7 @@ def main() -> None:
         client=client,
         output_directory=args.output,
     )
-    print(f"Archive written to {args.output.resolve()}", file=sys.stderr)
+    logger.info(f"Archive written to {args.output.resolve()}")
 
 
 if __name__ == "__main__":

@@ -1,9 +1,6 @@
 from __future__ import annotations
 
-from typing import Any
-
-type Json = Any
-type JsonObject = dict[str, Json]
+from hpikit.json import Json
 
 
 def safe_file_name(name: str) -> str:
@@ -13,7 +10,7 @@ def safe_file_name(name: str) -> str:
     return name
 
 
-def session_file_name(session: JsonObject) -> str:
+def session_file_name(session: Json) -> str:
     measured_on = session["measuredOn"]
     assert isinstance(measured_on, str), measured_on
     measurement_id = session["userMeasurementId"]

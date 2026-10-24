@@ -3,6 +3,8 @@
 dynamic = ["version"]  # version is managed by build backend
 name = "mywellnessexport"
 dependencies = [
+    "hpikit",
+    "kloggy",
 ]
 requires-python = ">=3.14"
 
@@ -22,6 +24,9 @@ Homepage = "https://github.com/karlicoss/mywellnessexport"
 export = [
     "requests",
 ]
+optional = [
+    "hpikit[optional]", # faster JSON parsing and transparent compression
+]
 table = [
     "tabulate",
 ]
@@ -34,7 +39,7 @@ testing = [
     "pytest",
     "ruff",
 
-    "mywellnessexport[export,table]",
+    "mywellnessexport[export,optional,table]",
 ]
 typecheck = [
     "mypy",
